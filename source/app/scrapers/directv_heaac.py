@@ -1,11 +1,12 @@
-"""DirecTV: play the HE-AAC audio rendition instead of AC-3 (Dolby Digital).
+"""DirecTV: play the HE-AAC audio rendition instead of AC-3, at one fixed frame rate.
 
 DirecTV's live HLS master offers every video quality twice: once with an AC-3
 audio group (``CODECS="...,ac-3"``, ``AUDIO="AC3-384kbps"``) and once with an
 HE-AAC group (``CODECS="...,mp4a.40.5"``, ``AUDIO="HEAAC-96kbps"``). Which one a
 player picks is up to the player. This removes the AC-3 (and E-AC-3) variants and
 their audio renditions from the master FastChannels relays, so every player gets
-the HE-AAC audio. Video, subtitles and captions are untouched.
+the HE-AAC audio. It also keeps only the variants at the highest frame rate (59.94), so
+the player never switches frame rate mid-stream. Subtitles and captions are untouched.
 
 Safe by construction: a playlist with no AC-3 variant, or with no non-AC-3
 variant to fall back on, is returned unchanged.
@@ -30,13 +31,25 @@ def _attrs(tag_line: str) -> dict:
     return {k: v.strip('"') for k, v in _ATTR.findall(body)}
 
 
+def _fps(a: dict) -> float | None:
+    try:
+        return float(a['FRAME-RATE'])
+    except (KeyError, ValueError):
+        return None
+
+
 def prefer_heaac(text: str) -> str:
-    """Drop the Dolby (AC-3/E-AC-3) variants and audio renditions from an HLS master
-    playlist when an AAC variant exists for the player to use instead."""
+    """Rewrite a DirecTV HLS master so playback stays on one audio format and one frame rate:
+    - drop the Dolby (AC-3/E-AC-3) variants and audio renditions when an AAC variant exists;
+    - keep only the variants at the master's highest frame rate (59.94 on DirecTV), so the
+      player's bitrate adaptation never switches to a 29.97 variant mid-stream. A frame-rate
+      switch can make the box renegotiate HDMI, which drops audio on capture cards.
+    Anything it can't judge (no FRAME-RATE on a variant) is left alone; a master where nothing
+    would be left is returned unchanged."""
     if not text or '#EXT-X-STREAM-INF' not in text:
         return text
     lines = text.splitlines()
-    variants = []   # (tag index, uri index, is_dolby, audio group)
+    variants = []   # (tag index, uri index, is_dolby, audio group, fps)
     for i, line in enumerate(lines):
         if line.startswith('#EXT-X-STREAM-INF'):
             j = i + 1
@@ -44,17 +57,22 @@ def prefer_heaac(text: str) -> str:
                 j += 1
             a = _attrs(line)
             variants.append((i, j if j < len(lines) else None, bool(_DOLBY.search(a.get('CODECS', ''))),
-                             a.get('AUDIO')))
-    dolby = [v for v in variants if v[2]]
-    keep = [v for v in variants if not v[2]]
-    if not dolby or not keep:
+                             a.get('AUDIO'), _fps(a)))
+    keep = [v for v in variants if not v[2]] or variants
+    rates = [v[4] for v in keep]
+    if all(r is not None for r in rates) and len(set(rates)) > 1:
+        top = max(rates)
+        keep = [v for v in keep if v[4] >= top - 0.01]
+    if len(keep) == len(variants):
         return text
+    keep_tags = {v[0] for v in keep}
     kept_groups = {v[3] for v in keep if v[3]}
     drop = set()
-    for tag, uri, _, _ in dolby:
-        drop.add(tag)
-        if uri is not None:
-            drop.add(uri)
+    for tag, uri, _, _, _ in variants:
+        if tag not in keep_tags:
+            drop.add(tag)
+            if uri is not None:
+                drop.add(uri)
     for i, line in enumerate(lines):
         if line.startswith('#EXT-X-MEDIA') and 'TYPE=AUDIO' in line:
             group = _attrs(line).get('GROUP-ID')

@@ -31,7 +31,17 @@ v360_ac3.m3u8
 
 out = h.prefer_heaac(MASTER)
 assert 'ac-3' not in out and 'AC3-384kbps' not in out and 'ac3.m3u8' not in out, out
-assert out.count('#EXT-X-STREAM-INF') == 2 and 'v720_aac.m3u8' in out and 'v360_aac.m3u8' in out, out
+# One frame rate only: the 29.97 HE-AAC variant goes, the 59.94 one stays.
+assert out.count('#EXT-X-STREAM-INF') == 1 and 'v720_aac.m3u8' in out and 'v360_aac.m3u8' not in out, out
+assert 'FRAME-RATE=29.970' not in out, 'no 29.97 variant may remain'
+# An AAC-only master with mixed rates is still locked to the top rate.
+_aac_only = '\n'.join(l for l in MASTER.splitlines() if 'ac-3' not in l and 'ac3.m3u8' not in l
+                      and 'AC3-384kbps' not in l) + '\n'
+_o2 = h.prefer_heaac(_aac_only)
+assert 'FRAME-RATE=29.970' not in _o2 and 'v720_aac.m3u8' in _o2, _o2
+# A variant without FRAME-RATE: rates can't be judged, so no rate filtering.
+_norate = MASTER.replace(',FRAME-RATE=29.970', '')
+assert 'v360_aac.m3u8' in h.prefer_heaac(_norate)
 assert 'GROUP-ID="HEAAC-96kbps"' in out, 'the HE-AAC audio rendition must stay'
 assert 'TYPE=SUBTITLES' in out and 'TYPE=CLOSED-CAPTIONS' in out, 'subtitles and captions must stay'
 # Every remaining variant is followed by its own URI.
@@ -43,9 +53,11 @@ for _i, _x in enumerate(_l):
 assert 'ec-3' not in h.prefer_heaac(MASTER.replace('ac-3', 'ec-3'))
 # Fail safe: nothing to fall back on, or nothing to drop, or not a master -> unchanged.
 _only_ac3 = '\n'.join(x for x in MASTER.splitlines() if 'mp4a' not in x and 'aac.m3u8' not in x) + '\n'
-assert h.prefer_heaac(_only_ac3) == _only_ac3, 'an AC-3-only master must be left alone'
-_only_aac = MASTER.replace('ac-3', 'mp4a.40.2')
-assert h.prefer_heaac(_only_aac) == _only_aac
+_o3 = h.prefer_heaac(_only_ac3)
+assert 'v720_ac3.m3u8' in _o3 and 'GROUP-ID="AC3-384kbps"' in _o3, 'no AAC to fall back on: AC-3 audio stays'
+assert 'FRAME-RATE=29.970' not in _o3, 'the frame rate is still locked to 59.94'
+_one_rate = MASTER.replace('ac-3', 'mp4a.40.2').replace('FRAME-RATE=29.970', 'FRAME-RATE=59.940')
+assert h.prefer_heaac(_one_rate) == _one_rate, 'nothing to drop -> unchanged'
 _media = '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nseg1.m4a\n'
 assert h.prefer_heaac(_media) == _media, 'a media playlist must be left alone'
 assert h.prefer_heaac('') == ''
